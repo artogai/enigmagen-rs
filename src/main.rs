@@ -5,7 +5,7 @@ fn main() {
     let settings = enigma::Settings {
         rotors: (2, 5, 3),
         ring_settings: (8, 5, 20),
-        ring_positions: (13, 3, 21),
+        rotor_positions: (13, 3, 21),
         plugboard: vec![('A', 'B'), ('C', 'D')],
     };
 

@@ -4,7 +4,7 @@ use enigma_simulator::{EnigmaBuilder, EnigmaMachine};
 pub struct Settings {
     pub rotors: (u8, u8, u8),
     pub ring_settings: (u8, u8, u8),
-    pub ring_positions: (u8, u8, u8),
+    pub rotor_positions: (u8, u8, u8),
     pub plugboard: Vec<(char, char)>,
 }
 
@@ -25,7 +25,7 @@ impl Machine {
             internal: EnigmaMachine::new()
                 .reflector("B")
                 .rotors(s.rotors.0, s.rotors.1, s.rotors.2)
-                .ring_positions(s.ring_positions.0, s.ring_positions.1, s.ring_positions.2)
+                .ring_positions(s.rotor_positions.0, s.rotor_positions.1, s.rotor_positions.2)
                 .ring_settings(s.ring_settings.0, s.ring_settings.1, s.ring_settings.2)
                 .plugboard(&plugboard)?,
         })

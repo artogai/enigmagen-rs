@@ -1,6 +1,10 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::LazyLock};
 
-use genevo::prelude::{FitnessFunction, Genotype};
+use genevo::{
+    prelude::{FitnessFunction, GenomeBuilder, Genotype},
+    random::Rng,
+};
+use rand::seq::{IteratorRandom, SliceRandom};
 
 use crate::enigma::{Machine, Settings};
 
@@ -59,6 +63,48 @@ fn index_of_coincidence(text: &str) -> f64 {
     numerator as f64 / denominator as f64
 }
 
+static PLUGS: LazyLock<Vec<(char, char)>> = LazyLock::new(|| {
+    let letters: Vec<char> = ('A'..='Z').collect();
+
+    let mut plugs = Vec::new();
+
+    for i in 0..letters.len() {
+        for j in i + 1..letters.len() {
+            plugs.push((letters[i], letters[j]));
+        }
+    }
+
+    plugs
+});
+
+struct SettingsBuilder;
+
+impl GenomeBuilder<Settings> for SettingsBuilder {
+    fn build_genome<R>(&self, _: usize, rng: &mut R) -> Settings
+    where
+        R: Rng + Sized,
+    {
+        let gen_3_from_1_to_26 = |rng: &mut R| {
+            std::iter::repeat_with(|| rng.gen_range(1..=26))
+                .take(3)
+                .collect::<Vec<u8>>()
+        };
+
+        let rotors = (1..=6).choose_multiple(rng, 3);
+        let ring_settings = gen_3_from_1_to_26(rng);
+        let rotor_positions = gen_3_from_1_to_26(rng);
+        let plugs_cnt = rng.gen_range(0..=10);
+        let plugs = PLUGS.choose_multiple(rng, plugs_cnt).cloned().collect();
+
+        Settings {
+            rotors: (rotors[0], rotors[1], rotors[2]),
+            ring_settings: (ring_settings[0], ring_settings[1], ring_settings[2]),
+            rotor_positions: (rotor_positions[0], rotor_positions[1], rotor_positions[2]),
+            plugboard: plugs,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use approx::assert_relative_eq;
@@ -87,7 +133,7 @@ mod tests {
         let settings = enigma::Settings {
             rotors: (2, 5, 3),
             ring_settings: (8, 5, 20),
-            ring_positions: (13, 3, 21),
+            rotor_positions: (13, 3, 21),
             plugboard: vec![('A', 'B'), ('C', 'D')],
         };
 
@@ -100,17 +146,46 @@ mod tests {
         };
 
         let mut closer_settings = settings.clone();
-        closer_settings.ring_positions = (13, 3, 22);
+        closer_settings.rotor_positions = (13, 3, 22);
 
         let wrong_settings = enigma::Settings {
             rotors: (1, 2, 3),
             ring_settings: (1, 1, 1),
-            ring_positions: (1, 1, 1),
+            rotor_positions: (1, 1, 1),
             plugboard: Vec::new(),
         };
 
         assert_eq!(calc.fitness_of(&settings), 70347);
         assert_eq!(calc.fitness_of(&closer_settings), 39388);
         assert_eq!(calc.fitness_of(&wrong_settings), 36722);
+    }
+
+    #[test]
+    fn test_genome_builder() {
+        fn assert_in_range(v: (u8, u8, u8), from: u8, until: u8) {
+            assert!(v.0 >= from && v.0 < until);
+            assert!(v.1 >= from && v.1 < until);
+            assert!(v.2 >= from && v.2 < until);
+        }
+
+        let mut rng = rand::thread_rng();
+        let b = SettingsBuilder {};
+
+        for _ in 0..100 {
+            let sett = b.build_genome(0, &mut rng);
+
+            assert_in_range(sett.rotors, 1, 7);
+            assert_in_range(sett.ring_settings, 1, 27);
+            assert_in_range(sett.rotor_positions, 1, 27);
+            assert!(sett.plugboard.len() <= 10);
+
+            let mut rotors = vec![sett.rotors.0, sett.rotors.1, sett.rotors.2];
+            rotors.dedup();
+            assert_eq!(rotors.len(), 3);
+
+            let mut plugs = sett.plugboard.clone();
+            plugs.dedup();
+            assert_eq!(plugs.len(), sett.plugboard.len());
+        }
     }
 }
