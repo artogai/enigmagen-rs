@@ -1,6 +1,8 @@
 use std::{collections::HashMap, sync::LazyLock};
 
 use genevo::{
+    genetic::{Children, Parents},
+    operator::{CrossoverOp, GeneticOperator, MutationOp},
     prelude::{FitnessFunction, GenomeBuilder, Genotype},
     random::Rng,
 };
@@ -8,14 +10,39 @@ use rand::seq::{IteratorRandom, SliceRandom};
 
 use crate::enigma::{Machine, Settings};
 
+#[derive(Debug)]
+pub struct Options {
+    pub fitness_scale: usize,
+    pub population_size: usize,
+    pub generation_limit: u64,
+    pub num_individuals_per_parents: usize,
+    pub selection_ratio: f64,
+    pub mutation_rate: f64,
+    pub reinsertion_ratio: f64,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Options {
+            fitness_scale: 1000000,
+            population_size: 10000,
+            generation_limit: 200,
+            num_individuals_per_parents: 2,
+            selection_ratio: 0.5,
+            mutation_rate: 0.05,
+            reinsertion_ratio: 0.7,
+        }
+    }
+}
+
 impl Genotype for Settings {
     type Dna = u8;
 }
 
-#[derive(Clone, Debug)]
-struct FitnessCalc {
-    ciphertext: String,
-    max_value: usize,
+#[derive(Debug, Clone)]
+pub struct FitnessCalc {
+    pub ciphertext: String,
+    pub max_value: usize,
 }
 
 impl FitnessFunction<Settings, usize> for FitnessCalc {
@@ -77,7 +104,7 @@ static PLUGS: LazyLock<Vec<(char, char)>> = LazyLock::new(|| {
     plugs
 });
 
-struct SettingsBuilder;
+pub struct SettingsBuilder;
 
 impl GenomeBuilder<Settings> for SettingsBuilder {
     fn build_genome<R>(&self, _: usize, rng: &mut R) -> Settings
@@ -102,6 +129,62 @@ impl GenomeBuilder<Settings> for SettingsBuilder {
             rotor_positions: (rotor_positions[0], rotor_positions[1], rotor_positions[2]),
             plugboard: plugs,
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct SettingsCrossover;
+
+impl GeneticOperator for SettingsCrossover {
+    fn name() -> String {
+        "Settings-Crossover".to_string()
+    }
+}
+
+impl CrossoverOp<Settings> for SettingsCrossover {
+    fn crossover<R>(&self, parents: Parents<Settings>, rng: &mut R) -> Children<Settings>
+    where
+        R: Rng + Sized,
+    {
+        let num_parents = parents.len();
+        let mut offsprings: Vec<Settings> = Vec::with_capacity(num_parents);
+
+        for _ in 0..num_parents {
+            let i = rng.gen_range(0..num_parents);
+            let mut j = rng.gen_range(0..num_parents);
+
+            while i == j {
+                j = rng.gen_range(0..num_parents);
+            }
+
+            offsprings.push(cross(&parents[i], &parents[j]));
+        }
+
+        offsprings
+    }
+}
+
+fn cross(s1: &Settings, s2: &Settings) -> Settings {
+    todo!()
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct SettingsMutator {
+    pub mutation_rate: f64,
+}
+
+impl GeneticOperator for SettingsMutator {
+    fn name() -> String {
+        "Settings-Mutator".to_string()
+    }
+}
+
+impl MutationOp<Settings> for SettingsMutator {
+    fn mutate<R>(&self, genome: Settings, rng: &mut R) -> Settings
+    where
+        R: Rng + Sized,
+    {
+        todo!()
     }
 }
 
