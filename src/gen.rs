@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::LazyLock};
+use std::{cmp, collections::HashMap, sync::LazyLock};
 
 use genevo::{
     genetic::{Children, Parents},
@@ -6,9 +6,15 @@ use genevo::{
     prelude::{FitnessFunction, GenomeBuilder, Genotype},
     random::Rng,
 };
-use rand::seq::{IteratorRandom, SliceRandom};
+use rand::{
+    distributions,
+    prelude::Distribution,
+    seq::{IteratorRandom, SliceRandom},
+};
 
-use crate::enigma::{Machine, Settings};
+use crate::enigma::{
+    Machine, Settings, MAX_PLUGS, MAX_RING_SETTINGS_NUM, MAX_ROTOR_NUM, MAX_ROTOR_POSITIONS_NUM,
+};
 
 #[derive(Debug)]
 pub struct Options {
@@ -111,25 +117,66 @@ impl GenomeBuilder<Settings> for SettingsBuilder {
     where
         R: Rng + Sized,
     {
-        let gen_3_from_1_to_26 = |rng: &mut R| {
-            std::iter::repeat_with(|| rng.gen_range(1..=26))
-                .take(3)
-                .collect::<Vec<u8>>()
-        };
-
-        let rotors = (1..=6).choose_multiple(rng, 3);
-        let ring_settings = gen_3_from_1_to_26(rng);
-        let rotor_positions = gen_3_from_1_to_26(rng);
-        let plugs_cnt = rng.gen_range(0..=10);
-        let plugs = PLUGS.choose_multiple(rng, plugs_cnt).cloned().collect();
-
         Settings {
-            rotors: (rotors[0], rotors[1], rotors[2]),
-            ring_settings: (ring_settings[0], ring_settings[1], ring_settings[2]),
-            rotor_positions: (rotor_positions[0], rotor_positions[1], rotor_positions[2]),
-            plugboard: plugs,
+            rotors: gen_rotors(rng),
+            ring_settings: gen_ring_settings(rng),
+            rotor_positions: gen_rotor_positions(rng),
+            plugboard: gen_plugboard(rng),
         }
     }
+}
+
+fn gen_rotors<R: Rng>(rng: &mut R) -> (u8, u8, u8) {
+    gen_triple_unique(1, MAX_ROTOR_NUM, rng)
+}
+
+fn gen_ring_settings<R: Rng>(rng: &mut R) -> (u8, u8, u8) {
+    gen_triple(1, MAX_RING_SETTINGS_NUM, rng)
+}
+
+fn gen_rotor_positions<R: Rng>(rng: &mut R) -> (u8, u8, u8) {
+    gen_triple(1, MAX_ROTOR_POSITIONS_NUM, rng)
+}
+
+fn gen_triple_unique<R: Rng>(from: u8, to: u8, rng: &mut R) -> (u8, u8, u8) {
+    let r = (from..=to).choose_multiple(rng, 3);
+    (r[0], r[1], r[2])
+}
+
+fn gen_triple<R: Rng>(from: u8, to: u8, rng: &mut R) -> (u8, u8, u8) {
+    let r = std::iter::repeat_with(|| rng.gen_range(from..=to))
+        .take(3)
+        .collect::<Vec<u8>>();
+
+    (r[0], r[1], r[2])
+}
+
+fn gen_plugboard<R: Rng>(rng: &mut R) -> Vec<(char, char)> {
+    let plugs_cnt = rng.gen_range(0..=MAX_PLUGS);
+    let mut plugs = Vec::new();
+
+    for _ in 0..plugs_cnt {
+        let mut next: (char, char);
+
+        loop {
+            next = PLUGS.choose(rng).unwrap().clone();
+
+            if can_add_plug(&plugs, next) {
+                break;
+            }
+        }
+
+        plugs.push(next.clone());
+    }
+
+    plugs
+}
+
+fn can_add_plug(plugs: &[(char, char)], next: (char, char)) -> bool {
+    // on small numbers vec should be faster that building a set
+    plugs
+        .iter()
+        .all(|(p0, p1)| p0 != &next.0 && p1 != &next.0 && p0 != &next.1 && p1 != &next.1)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -148,6 +195,7 @@ impl CrossoverOp<Settings> for SettingsCrossover {
     {
         let num_parents = parents.len();
         let mut offsprings: Vec<Settings> = Vec::with_capacity(num_parents);
+        let bernoulli = distributions::Bernoulli::new(0.5).unwrap();
 
         for _ in 0..num_parents {
             let i = rng.gen_range(0..num_parents);
@@ -157,15 +205,85 @@ impl CrossoverOp<Settings> for SettingsCrossover {
                 j = rng.gen_range(0..num_parents);
             }
 
-            offsprings.push(cross(&parents[i], &parents[j]));
+            offsprings.push(cross_settings(&parents[i], &parents[j], bernoulli, rng));
         }
 
         offsprings
     }
 }
 
-fn cross(s1: &Settings, s2: &Settings) -> Settings {
-    todo!()
+fn cross_settings<R: Rng>(
+    sett1: &Settings,
+    sett2: &Settings,
+    bernoulli: distributions::Bernoulli,
+    rng: &mut R,
+) -> Settings {
+    Settings {
+        rotors: cross_rotors(sett1.rotors, sett2.rotors, bernoulli, rng),
+        ring_settings: cross_positionally(sett1.ring_settings, sett2.ring_settings, bernoulli, rng),
+        rotor_positions: cross_positionally(
+            sett1.rotor_positions,
+            sett2.rotor_positions,
+            bernoulli,
+            rng,
+        ),
+        plugboard: cross_plugboards(&sett1.plugboard, &sett2.plugboard, bernoulli, rng),
+    }
+}
+
+fn cross_plugboards<R: Rng>(
+    plugs1: &[(char, char)],
+    plugs2: &[(char, char)],
+    bernoulli: distributions::Bernoulli,
+    rng: &mut R,
+) -> Vec<(char, char)> {
+    let mut plugs = Vec::new();
+
+    for i in 0..cmp::max(plugs1.len(), plugs2.len()) {
+        let c = bernoulli.sample(rng);
+
+        if c && i < plugs1.len() && can_add_plug(&plugs, plugs1[i]) {
+            plugs.push(plugs1[i]);
+        }
+
+        if !c && i < plugs2.len() && can_add_plug(&plugs, plugs2[i]) {
+            plugs.push(plugs2[i]);
+        }
+    }
+
+    plugs
+}
+
+fn cross_rotors<R: Rng>(
+    rotors1: (u8, u8, u8),
+    rotors2: (u8, u8, u8),
+    bernoulli: distributions::Bernoulli,
+    rng: &mut R,
+) -> (u8, u8, u8) {
+    loop {
+        let r = cross_positionally(rotors1, rotors2, bernoulli, rng);
+
+        if is_triple_unique(r) {
+            return r;
+        }
+    }
+}
+
+fn is_triple_unique(t: (u8, u8, u8)) -> bool {
+    t.0 != t.1 && t.1 != t.2
+}
+
+fn cross_positionally<R: Rng>(
+    x: (u8, u8, u8),
+    y: (u8, u8, u8),
+    bernoulli: distributions::Bernoulli,
+    rng: &mut R,
+) -> (u8, u8, u8) {
+    (
+        if bernoulli.sample(rng) { x.0 } else { y.0 },
+        if bernoulli.sample(rng) { x.1 } else { y.1 },
+        if bernoulli.sample(rng) { x.2 } else { y.2 },
+    )
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -180,11 +298,82 @@ impl GeneticOperator for SettingsMutator {
 }
 
 impl MutationOp<Settings> for SettingsMutator {
-    fn mutate<R>(&self, genome: Settings, rng: &mut R) -> Settings
+    fn mutate<R>(&self, sett: Settings, rng: &mut R) -> Settings
     where
         R: Rng + Sized,
     {
-        todo!()
+        let mut mutated = sett.clone();
+
+        match rng.gen_range(0..=3) {
+            0 => mutated.rotors = mutate_rotors(sett.rotors, rng),
+            1 => mutated.ring_settings = mutate_ring_settings(sett.ring_settings, rng),
+            2 => mutated.rotor_positions = mutate_rotor_positions(sett.rotor_positions, rng),
+            3 => mutated.plugboard = mutate_plugboard(&sett.plugboard, rng),
+            _ => panic!("out of settings range"),
+        }
+
+        mutated
+    }
+}
+
+fn mutate_rotors<R: Rng>(rotors: (u8, u8, u8), rng: &mut R) -> (u8, u8, u8) {
+    mutate_triple_unique(rotors, 1, MAX_ROTOR_NUM, rng)
+}
+
+fn mutate_ring_settings<R: Rng>(sett: (u8, u8, u8), rng: &mut R) -> (u8, u8, u8) {
+    mutate_triple(sett, 1, MAX_RING_SETTINGS_NUM, rng)
+}
+
+fn mutate_rotor_positions<R: Rng>(pos: (u8, u8, u8), rng: &mut R) -> (u8, u8, u8) {
+    mutate_triple(pos, 1, MAX_ROTOR_POSITIONS_NUM, rng)
+}
+
+fn mutate_plugboard<R: Rng>(plugs: &[(char, char)], rng: &mut R) -> Vec<(char, char)> {
+    let mut mutated = plugs.to_vec();
+
+    if !plugs.is_empty() {
+        let idx = rng.gen_range(0..plugs.len());
+        let mut next: (char, char);
+
+        loop {
+            next = PLUGS.choose(rng).unwrap().clone();
+            let (left, right) = mutated.split_at(idx);
+
+            if can_add_plug(left, next) && can_add_plug(&right[1..], next) {
+                break;
+            }
+        }
+
+        mutated[idx] = next;
+    }
+
+    mutated
+}
+
+fn mutate_triple_unique<R: Rng>(t: (u8, u8, u8), from: u8, to: u8, rng: &mut R) -> (u8, u8, u8) {
+    let pos = rng.gen_range(0..3);
+
+    loop {
+        let next = change_triple(t, pos, from, to, rng);
+        if is_triple_unique(next) {
+            return next;
+        }
+    }
+}
+
+fn mutate_triple<R: Rng>(t: (u8, u8, u8), from: u8, to: u8, rng: &mut R) -> (u8, u8, u8) {
+    let pos = rng.gen_range(0..3);
+
+    change_triple(t, pos, from, to, rng)
+}
+
+fn change_triple<R: Rng>(t: (u8, u8, u8), pos: u8, from: u8, to: u8, rng: &mut R) -> (u8, u8, u8) {
+    let v = rng.gen_range(from..=to);
+    match pos {
+        0 => (v, t.1, t.2),
+        1 => (t.0, v, t.2),
+        2 => (t.0, t.1, v),
+        _ => panic!("out of triple range"),
     }
 }
 
@@ -244,31 +433,53 @@ mod tests {
     }
 
     #[test]
-    fn test_genome_builder() {
-        fn assert_in_range(v: (u8, u8, u8), from: u8, until: u8) {
-            assert!(v.0 >= from && v.0 < until);
-            assert!(v.1 >= from && v.1 < until);
-            assert!(v.2 >= from && v.2 < until);
-        }
-
+    fn test_settings_builder() {
         let mut rng = rand::thread_rng();
         let b = SettingsBuilder {};
 
-        for _ in 0..100 {
+        for _ in 0..10000 {
             let sett = b.build_genome(0, &mut rng);
-
-            assert_in_range(sett.rotors, 1, 7);
-            assert_in_range(sett.ring_settings, 1, 27);
-            assert_in_range(sett.rotor_positions, 1, 27);
-            assert!(sett.plugboard.len() <= 10);
-
-            let mut rotors = vec![sett.rotors.0, sett.rotors.1, sett.rotors.2];
-            rotors.dedup();
-            assert_eq!(rotors.len(), 3);
-
-            let mut plugs = sett.plugboard.clone();
-            plugs.dedup();
-            assert_eq!(plugs.len(), sett.plugboard.len());
+            assert!(is_settings_valid(&sett))
         }
+    }
+
+    #[test]
+    fn test_settings_crossover() {
+        let mut rng = rand::thread_rng();
+        let b = SettingsBuilder {};
+        let c = SettingsCrossover {};
+
+        for _ in 0..10000 {
+            let sett1 = b.build_genome(0, &mut rng);
+            let sett2 = b.build_genome(0, &mut rng);
+
+            let offsprings = c.crossover(vec![sett1.clone(), sett2.clone()], &mut rng);
+
+            assert!(offsprings.iter().all(is_settings_valid))
+        }
+    }
+
+    fn is_settings_valid(sett: &Settings) -> bool {
+        is_triple_unique(sett.rotors)
+            && is_triple_in_range(sett.rotors, 1, MAX_ROTOR_NUM)
+            && is_triple_in_range(sett.ring_settings, 1, MAX_RING_SETTINGS_NUM)
+            && is_triple_in_range(sett.rotor_positions, 1, MAX_ROTOR_POSITIONS_NUM)
+            && is_plugboard_valid(&sett.plugboard)
+    }
+
+    fn is_plugboard_valid(p: &[(char, char)]) -> bool {
+        let plugs = p
+            .iter()
+            .flat_map(|(p1, p2)| vec![p1, p2])
+            .collect::<Vec<_>>();
+
+        let mut letters_uniq = plugs.clone();
+        letters_uniq.dedup();
+
+        p.len() <= MAX_PLUGS && plugs.len() == letters_uniq.len()
+    }
+
+    fn is_triple_in_range(t: (u8, u8, u8), from: u8, to: u8) -> bool {
+        t.0 >= from && t.0 <= to && t.1 >= from && t.1 <= to && t.2 >= from && t.2 <= to
     }
 }
