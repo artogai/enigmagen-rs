@@ -3,14 +3,12 @@ use enigma_simulator::{EnigmaBuilder, EnigmaMachine};
 pub const MAX_ROTOR_NUM: u8 = 6;
 pub const MAX_RING_SETTINGS_NUM: u8 = 26;
 pub const MAX_ROTOR_POSITIONS_NUM: u8 = 26;
-pub const MAX_PLUGS: usize = 10;
 
 #[derive(PartialEq, Debug, Clone)]
 pub struct Settings {
     pub rotors: (u8, u8, u8),
     pub ring_settings: (u8, u8, u8),
     pub rotor_positions: (u8, u8, u8),
-    pub plugboard: Vec<(char, char)>,
 }
 
 pub struct Machine {
@@ -19,13 +17,6 @@ pub struct Machine {
 
 impl Machine {
     pub fn new(s: &Settings) -> anyhow::Result<Self> {
-        let plugboard = s
-            .plugboard
-            .iter()
-            .map(|(l, r)| format!("{}{}", l, r))
-            .collect::<Vec<_>>()
-            .join(" ");
-
         Ok(Self {
             internal: EnigmaMachine::new()
                 .reflector("B")
@@ -35,8 +26,7 @@ impl Machine {
                     s.rotor_positions.1,
                     s.rotor_positions.2,
                 )
-                .ring_settings(s.ring_settings.0, s.ring_settings.1, s.ring_settings.2)
-                .plugboard(&plugboard)?,
+                .ring_settings(s.ring_settings.0, s.ring_settings.1, s.ring_settings.2)?,
         })
     }
 

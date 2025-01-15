@@ -1,4 +1,4 @@
-use std::{cmp, collections::HashMap, sync::LazyLock};
+use std::sync::Arc;
 
 use genevo::{
     genetic::{Children, Parents},
@@ -6,14 +6,10 @@ use genevo::{
     prelude::{FitnessFunction, GenomeBuilder, Genotype},
     random::Rng,
 };
-use rand::{
-    distributions,
-    prelude::Distribution,
-    seq::{IteratorRandom, SliceRandom},
-};
+use rand::{distributions, prelude::Distribution, seq::IteratorRandom};
 
 use crate::enigma::{
-    Machine, Settings, MAX_PLUGS, MAX_RING_SETTINGS_NUM, MAX_ROTOR_NUM, MAX_ROTOR_POSITIONS_NUM,
+    Machine, Settings, MAX_RING_SETTINGS_NUM, MAX_ROTOR_NUM, MAX_ROTOR_POSITIONS_NUM,
 };
 
 #[derive(Debug)]
@@ -32,7 +28,7 @@ impl Default for Options {
         Options {
             fitness_scale: 1000000,
             population_size: 10000,
-            generation_limit: 200,
+            generation_limit: 100,
             num_individuals_per_parents: 2,
             selection_ratio: 0.5,
             mutation_rate: 0.05,
@@ -47,7 +43,7 @@ impl Genotype for Settings {
 
 #[derive(Debug, Clone)]
 pub struct FitnessCalc {
-    pub ciphertext: String,
+    pub ciphertext: Arc<String>,
     pub max_value: usize,
 }
 
@@ -73,42 +69,36 @@ impl FitnessFunction<Settings, usize> for FitnessCalc {
 }
 
 fn index_of_coincidence(text: &str) -> f64 {
-    let filtered_text = text
-        .chars()
-        .filter(|c| c.is_alphanumeric())
-        .collect::<String>()
-        .to_uppercase();
+    debug_assert!(
+        text.chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_whitespace()),
+        "only A..Z and whitespace are supported"
+    );
 
-    let n = filtered_text.len();
+    let n = text.len();
     if n <= 1 {
         return 0.0;
     }
 
-    let mut hist = HashMap::<char, usize>::new();
+    let mut hist = [0; 26];
 
-    filtered_text
-        .chars()
-        .for_each(|c| *hist.entry(c).or_insert(0) += 1);
+    text.chars()
+        .filter(|c| c.is_ascii_uppercase())
+        .for_each(|c| {
+            let idx = c as usize - 'A' as usize;
+            hist[idx] += 1;
+        });
 
-    let numerator = hist.values().map(|freq| freq * (freq - 1)).sum::<usize>();
+    let numerator = hist
+        .into_iter()
+        .filter(|&freq| freq > 0)
+        .map(|freq| freq * (freq - 1))
+        .sum::<usize>();
+
     let denominator = n * (n - 1);
 
     numerator as f64 / denominator as f64
 }
-
-static PLUGS: LazyLock<Vec<(char, char)>> = LazyLock::new(|| {
-    let letters: Vec<char> = ('A'..='Z').collect();
-
-    let mut plugs = Vec::new();
-
-    for i in 0..letters.len() {
-        for j in i + 1..letters.len() {
-            plugs.push((letters[i], letters[j]));
-        }
-    }
-
-    plugs
-});
 
 pub struct SettingsBuilder;
 
@@ -118,24 +108,11 @@ impl GenomeBuilder<Settings> for SettingsBuilder {
         R: Rng + Sized,
     {
         Settings {
-            rotors: gen_rotors(rng),
-            ring_settings: gen_ring_settings(rng),
-            rotor_positions: gen_rotor_positions(rng),
-            plugboard: gen_plugboard(rng),
+            rotors: gen_triple_unique(1, MAX_ROTOR_NUM, rng),
+            ring_settings: gen_triple(1, MAX_RING_SETTINGS_NUM, rng),
+            rotor_positions: gen_triple(1, MAX_ROTOR_POSITIONS_NUM, rng),
         }
     }
-}
-
-fn gen_rotors<R: Rng>(rng: &mut R) -> (u8, u8, u8) {
-    gen_triple_unique(1, MAX_ROTOR_NUM, rng)
-}
-
-fn gen_ring_settings<R: Rng>(rng: &mut R) -> (u8, u8, u8) {
-    gen_triple(1, MAX_RING_SETTINGS_NUM, rng)
-}
-
-fn gen_rotor_positions<R: Rng>(rng: &mut R) -> (u8, u8, u8) {
-    gen_triple(1, MAX_ROTOR_POSITIONS_NUM, rng)
 }
 
 fn gen_triple_unique<R: Rng>(from: u8, to: u8, rng: &mut R) -> (u8, u8, u8) {
@@ -149,34 +126,6 @@ fn gen_triple<R: Rng>(from: u8, to: u8, rng: &mut R) -> (u8, u8, u8) {
         .collect::<Vec<u8>>();
 
     (r[0], r[1], r[2])
-}
-
-fn gen_plugboard<R: Rng>(rng: &mut R) -> Vec<(char, char)> {
-    let plugs_cnt = rng.gen_range(0..=MAX_PLUGS);
-    let mut plugs = Vec::new();
-
-    for _ in 0..plugs_cnt {
-        let mut next: (char, char);
-
-        loop {
-            next = PLUGS.choose(rng).unwrap().clone();
-
-            if can_add_plug(&plugs, next) {
-                break;
-            }
-        }
-
-        plugs.push(next.clone());
-    }
-
-    plugs
-}
-
-fn can_add_plug(plugs: &[(char, char)], next: (char, char)) -> bool {
-    // on small numbers vec should be faster that building a set
-    plugs
-        .iter()
-        .all(|(p0, p1)| p0 != &next.0 && p1 != &next.0 && p0 != &next.1 && p1 != &next.1)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -193,31 +142,15 @@ impl CrossoverOp<Settings> for SettingsCrossover {
     where
         R: Rng + Sized,
     {
-        let num_parents = parents.len();
-        let mut offsprings: Vec<Settings> = Vec::with_capacity(num_parents);
-        let bernoulli = distributions::Bernoulli::new(0.5).unwrap();
+        debug_assert_eq!(parents.len(), 2, "crossover should use 2 parents");
 
-        for _ in 0..num_parents {
-            let i = rng.gen_range(0..num_parents);
-            let mut j = rng.gen_range(0..num_parents);
-
-            while i == j {
-                j = rng.gen_range(0..num_parents);
-            }
-
-            offsprings.push(cross_settings(&parents[i], &parents[j], bernoulli, rng));
-        }
-
-        offsprings
+        vec![cross_settings(&parents[0], &parents[1], rng)]
     }
 }
 
-fn cross_settings<R: Rng>(
-    sett1: &Settings,
-    sett2: &Settings,
-    bernoulli: distributions::Bernoulli,
-    rng: &mut R,
-) -> Settings {
+fn cross_settings<R: Rng>(sett1: &Settings, sett2: &Settings, rng: &mut R) -> Settings {
+    let bernoulli = distributions::Bernoulli::new(0.5).unwrap();
+
     Settings {
         rotors: cross_rotors(sett1.rotors, sett2.rotors, bernoulli, rng),
         ring_settings: cross_positionally(sett1.ring_settings, sett2.ring_settings, bernoulli, rng),
@@ -227,31 +160,7 @@ fn cross_settings<R: Rng>(
             bernoulli,
             rng,
         ),
-        plugboard: cross_plugboards(&sett1.plugboard, &sett2.plugboard, bernoulli, rng),
     }
-}
-
-fn cross_plugboards<R: Rng>(
-    plugs1: &[(char, char)],
-    plugs2: &[(char, char)],
-    bernoulli: distributions::Bernoulli,
-    rng: &mut R,
-) -> Vec<(char, char)> {
-    let mut plugs = Vec::new();
-
-    for i in 0..cmp::max(plugs1.len(), plugs2.len()) {
-        let c = bernoulli.sample(rng);
-
-        if c && i < plugs1.len() && can_add_plug(&plugs, plugs1[i]) {
-            plugs.push(plugs1[i]);
-        }
-
-        if !c && i < plugs2.len() && can_add_plug(&plugs, plugs2[i]) {
-            plugs.push(plugs2[i]);
-        }
-    }
-
-    plugs
 }
 
 fn cross_rotors<R: Rng>(
@@ -270,7 +179,7 @@ fn cross_rotors<R: Rng>(
 }
 
 fn is_triple_unique(t: (u8, u8, u8)) -> bool {
-    t.0 != t.1 && t.1 != t.2
+    t.0 != t.1 && t.1 != t.2 && t.2 != t.0
 }
 
 fn cross_positionally<R: Rng>(
@@ -302,52 +211,31 @@ impl MutationOp<Settings> for SettingsMutator {
     where
         R: Rng + Sized,
     {
+        let num_mutations = ((9_f64 * self.mutation_rate) + rng.gen::<f64>()).floor() as usize;
+
+        if num_mutations == 0 {
+            return sett;
+        }
+
         let mut mutated = sett.clone();
 
-        match rng.gen_range(0..=3) {
-            0 => mutated.rotors = mutate_rotors(sett.rotors, rng),
-            1 => mutated.ring_settings = mutate_ring_settings(sett.ring_settings, rng),
-            2 => mutated.rotor_positions = mutate_rotor_positions(sett.rotor_positions, rng),
-            3 => mutated.plugboard = mutate_plugboard(&sett.plugboard, rng),
-            _ => panic!("out of settings range"),
+        for _ in 0..num_mutations {
+            match rng.gen_range(0..=2) {
+                0 => mutated.rotors = mutate_triple_unique(sett.rotors, 1, MAX_ROTOR_NUM, rng),
+                1 => {
+                    mutated.ring_settings =
+                        mutate_triple(sett.ring_settings, 1, MAX_RING_SETTINGS_NUM, rng)
+                }
+                2 => {
+                    mutated.rotor_positions =
+                        mutate_triple(sett.rotor_positions, 1, MAX_ROTOR_POSITIONS_NUM, rng)
+                }
+                _ => panic!("out of settings range"),
+            }
         }
 
         mutated
     }
-}
-
-fn mutate_rotors<R: Rng>(rotors: (u8, u8, u8), rng: &mut R) -> (u8, u8, u8) {
-    mutate_triple_unique(rotors, 1, MAX_ROTOR_NUM, rng)
-}
-
-fn mutate_ring_settings<R: Rng>(sett: (u8, u8, u8), rng: &mut R) -> (u8, u8, u8) {
-    mutate_triple(sett, 1, MAX_RING_SETTINGS_NUM, rng)
-}
-
-fn mutate_rotor_positions<R: Rng>(pos: (u8, u8, u8), rng: &mut R) -> (u8, u8, u8) {
-    mutate_triple(pos, 1, MAX_ROTOR_POSITIONS_NUM, rng)
-}
-
-fn mutate_plugboard<R: Rng>(plugs: &[(char, char)], rng: &mut R) -> Vec<(char, char)> {
-    let mut mutated = plugs.to_vec();
-
-    if !plugs.is_empty() {
-        let idx = rng.gen_range(0..plugs.len());
-        let mut next: (char, char);
-
-        loop {
-            next = PLUGS.choose(rng).unwrap().clone();
-            let (left, right) = mutated.split_at(idx);
-
-            if can_add_plug(left, next) && can_add_plug(&right[1..], next) {
-                break;
-            }
-        }
-
-        mutated[idx] = next;
-    }
-
-    mutated
 }
 
 fn mutate_triple_unique<R: Rng>(t: (u8, u8, u8), from: u8, to: u8, rng: &mut R) -> (u8, u8, u8) {
@@ -385,11 +273,7 @@ mod tests {
 
     use super::*;
 
-    const LONG_TEXT: &str = "To be, or not to be, that is the question: \
-        Whether 'tis nobler in the mind to suffer \
-        The slings and arrows of outrageous fortune, \
-        Or to take arms against a sea of troubles \
-        And by opposing end them.";
+    const LONG_TEXT: &str = "TO BE OR NOT TO BE THAT IS THE QUESTION WHETHER TIS NOBLER IN THE MIND TO SUFFER THE SLINGS AND ARROWS OF OUTRAGEOUS FORTUNE OR TO TAKE ARMS AGAINST A SEA OF TROUBLES AND BY OPPOSING END THEMTO DIETO SLEEP NO MORE AND BY A SLEEP TO SAY WE END THE HEARTACHE AND THE THOUSAND NATURAL SHOCKS THAT FLESH IS HEIR TOTIS A CONSUMMATION DEVOUTLY TO BE WISHD TO DIETO SLEEP TO SLEEP PERCHANCE TO DREAMAY THERES THE RUB FOR IN THAT SLEEP OF DEATH WHAT DREAMS MAY COME WHEN WE HAVE SHUFFLED OFF THIS MORTAL COIL MUST GIVE US PAUSE THERES THE RESPECT THAT MAKES CALAMITY OF SO LONG LIFE";
 
     #[test]
     fn test_ioc() {
@@ -397,7 +281,7 @@ mod tests {
         assert_relative_eq!(index_of_coincidence("A"), 0.0);
         assert_relative_eq!(index_of_coincidence("AB"), 0.0);
         assert_relative_eq!(index_of_coincidence("ABAA"), 0.5);
-        assert_relative_eq!(index_of_coincidence(LONG_TEXT), 0.07034743722050224);
+        assert_relative_eq!(index_of_coincidence(LONG_TEXT), 0.0455454816328268);
     }
 
     #[test]
@@ -406,30 +290,28 @@ mod tests {
             rotors: (2, 5, 3),
             ring_settings: (8, 5, 20),
             rotor_positions: (13, 3, 21),
-            plugboard: vec![('A', 'B'), ('C', 'D')],
         };
 
         let machine = Machine::new(&settings).unwrap();
         let ciphertext = machine.encrypt(LONG_TEXT);
 
         let calc = FitnessCalc {
-            ciphertext: ciphertext.to_owned(),
+            ciphertext: Arc::new(ciphertext),
             max_value: 1000000,
         };
 
         let mut closer_settings = settings.clone();
-        closer_settings.rotor_positions = (13, 3, 22);
+        closer_settings.ring_settings = (8, 5, 1);
 
         let wrong_settings = enigma::Settings {
             rotors: (1, 2, 3),
             ring_settings: (1, 1, 1),
             rotor_positions: (1, 1, 1),
-            plugboard: Vec::new(),
         };
 
-        assert_eq!(calc.fitness_of(&settings), 70347);
-        assert_eq!(calc.fitness_of(&closer_settings), 39388);
-        assert_eq!(calc.fitness_of(&wrong_settings), 36722);
+        assert_eq!(calc.fitness_of(&settings), 45545);
+        assert_eq!(calc.fitness_of(&closer_settings), 25278);
+        assert_eq!(calc.fitness_of(&wrong_settings), 24561);
     }
 
     #[test]
@@ -459,24 +341,25 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_settings_mutator() {
+        let mut rng = rand::thread_rng();
+        let b = SettingsBuilder {};
+        let m = SettingsMutator { mutation_rate: 0.1 };
+
+        for _ in 0..10000 {
+            let sett = b.build_genome(0, &mut rng);
+            let mutated_sett = m.mutate(sett, &mut rng);
+
+            assert!(is_settings_valid(&mutated_sett));
+        }
+    }
+
     fn is_settings_valid(sett: &Settings) -> bool {
         is_triple_unique(sett.rotors)
             && is_triple_in_range(sett.rotors, 1, MAX_ROTOR_NUM)
             && is_triple_in_range(sett.ring_settings, 1, MAX_RING_SETTINGS_NUM)
             && is_triple_in_range(sett.rotor_positions, 1, MAX_ROTOR_POSITIONS_NUM)
-            && is_plugboard_valid(&sett.plugboard)
-    }
-
-    fn is_plugboard_valid(p: &[(char, char)]) -> bool {
-        let plugs = p
-            .iter()
-            .flat_map(|(p1, p2)| vec![p1, p2])
-            .collect::<Vec<_>>();
-
-        let mut letters_uniq = plugs.clone();
-        letters_uniq.dedup();
-
-        p.len() <= MAX_PLUGS && plugs.len() == letters_uniq.len()
     }
 
     fn is_triple_in_range(t: (u8, u8, u8), from: u8, to: u8) -> bool {
