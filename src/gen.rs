@@ -1,11 +1,13 @@
 use std::sync::Arc;
 
+use chrono::Duration;
 use genevo::{
     genetic::{Children, Parents},
     operator::{CrossoverOp, GeneticOperator, MutationOp},
     prelude::{FitnessFunction, GenomeBuilder, Genotype},
     random::Rng,
 };
+use moka::sync::Cache;
 use rand::{distributions, prelude::Distribution, seq::IteratorRandom};
 
 use crate::enigma::{
@@ -17,24 +19,11 @@ pub struct Options {
     pub fitness_scale: usize,
     pub population_size: usize,
     pub generation_limit: u64,
-    pub num_individuals_per_parents: usize,
+    pub time_limit: Duration,
     pub selection_ratio: f64,
     pub mutation_rate: f64,
     pub reinsertion_ratio: f64,
-}
-
-impl Default for Options {
-    fn default() -> Self {
-        Options {
-            fitness_scale: 1000000,
-            population_size: 10000,
-            generation_limit: 100,
-            num_individuals_per_parents: 2,
-            selection_ratio: 0.5,
-            mutation_rate: 0.05,
-            reinsertion_ratio: 0.7,
-        }
-    }
+    pub cache_size: usize,
 }
 
 impl Genotype for Settings {
@@ -45,14 +34,21 @@ impl Genotype for Settings {
 pub struct FitnessCalc {
     pub ciphertext: Arc<String>,
     pub max_value: usize,
+    pub cache: Cache<Settings, usize>,
 }
 
 impl FitnessFunction<Settings, usize> for FitnessCalc {
     fn fitness_of(&self, s: &Settings) -> usize {
+        if let Some(norm_metric) = self.cache.get(s) {
+            return norm_metric;
+        }
+
         let machine = Machine::new(s).expect("Wrong machine settings");
         let plaintext = machine.decrypt(&self.ciphertext);
-        let metric = index_of_coincidence(&plaintext);
-        (metric * (self.max_value as f64)).round() as usize
+        let norm_metric = index_of_coincidence_norm(&plaintext, self.max_value);
+
+        self.cache.insert(s.clone(), norm_metric);
+        norm_metric
     }
 
     fn average(&self, fitness_values: &[usize]) -> usize {
@@ -68,6 +64,11 @@ impl FitnessFunction<Settings, usize> for FitnessCalc {
     }
 }
 
+pub fn index_of_coincidence_norm(text: &str, max_value: usize) -> usize {
+    let metric = index_of_coincidence(&text);
+    (metric * (max_value as f64)).round() as usize
+}
+
 fn index_of_coincidence(text: &str) -> f64 {
     debug_assert!(
         text.chars()
@@ -75,19 +76,20 @@ fn index_of_coincidence(text: &str) -> f64 {
         "only A..Z and whitespace are supported"
     );
 
-    let n = text.len();
+    let mut hist = [0; 26];
+    let mut n = 0;
+
+    text.chars().for_each(|c| {
+        if c.is_ascii_uppercase() {
+            let idx = c as usize - 'A' as usize;
+            hist[idx] += 1;
+            n += 1;
+        }
+    });
+
     if n <= 1 {
         return 0.0;
     }
-
-    let mut hist = [0; 26];
-
-    text.chars()
-        .filter(|c| c.is_ascii_uppercase())
-        .for_each(|c| {
-            let idx = c as usize - 'A' as usize;
-            hist[idx] += 1;
-        });
 
     let numerator = hist
         .into_iter()
@@ -143,7 +145,6 @@ impl CrossoverOp<Settings> for SettingsCrossover {
         R: Rng + Sized,
     {
         debug_assert_eq!(parents.len(), 2, "crossover should use 2 parents");
-
         vec![cross_settings(&parents[0], &parents[1], rng)]
     }
 }
@@ -220,7 +221,7 @@ impl MutationOp<Settings> for SettingsMutator {
         let mut mutated = sett.clone();
 
         for _ in 0..num_mutations {
-            match rng.gen_range(0..=2) {
+            match rng.gen_range(0..3) {
                 0 => mutated.rotors = mutate_triple_unique(sett.rotors, 1, MAX_ROTOR_NUM, rng),
                 1 => {
                     mutated.ring_settings =
@@ -281,7 +282,7 @@ mod tests {
         assert_relative_eq!(index_of_coincidence("A"), 0.0);
         assert_relative_eq!(index_of_coincidence("AB"), 0.0);
         assert_relative_eq!(index_of_coincidence("ABAA"), 0.5);
-        assert_relative_eq!(index_of_coincidence(LONG_TEXT), 0.0455454816328268);
+        assert_relative_eq!(index_of_coincidence(LONG_TEXT), 0.0700307611754696);
     }
 
     #[test]
@@ -298,6 +299,7 @@ mod tests {
         let calc = FitnessCalc {
             ciphertext: Arc::new(ciphertext),
             max_value: 1000000,
+            cache: Cache::new(100),
         };
 
         let mut closer_settings = settings.clone();
@@ -309,9 +311,9 @@ mod tests {
             rotor_positions: (1, 1, 1),
         };
 
-        assert_eq!(calc.fitness_of(&settings), 45545);
-        assert_eq!(calc.fitness_of(&closer_settings), 25278);
-        assert_eq!(calc.fitness_of(&wrong_settings), 24561);
+        assert_eq!(calc.fitness_of(&settings), 70031);
+        assert_eq!(calc.fitness_of(&closer_settings), 38868);
+        assert_eq!(calc.fitness_of(&wrong_settings), 37764);
     }
 
     #[test]
@@ -345,7 +347,7 @@ mod tests {
     fn test_settings_mutator() {
         let mut rng = rand::thread_rng();
         let b = SettingsBuilder {};
-        let m = SettingsMutator { mutation_rate: 0.1 };
+        let m = SettingsMutator { mutation_rate: 0.9 };
 
         for _ in 0..10000 {
             let sett = b.build_genome(0, &mut rng);
