@@ -22,13 +22,13 @@ fn main() {
 
     let sim_opts = gen::Options {
         fitness_scale: 1_000_000,
-        population_size: 2_000_000,
-        generation_limit: 600,
-        time_limit: Duration::minutes(10),
+        population_size: 1_500_000,
+        generation_limit: 300,
+        time_limit: Duration::minutes(15),
         selection_ratio: 0.5,
         mutation_rate: 0.05,
         reinsertion_ratio: 0.7,
-        cache_size: 5_000_000,
+        cache_size: 3_000_000,
     };
 
     let target_fitness = Some(index_of_coincidence_norm(
